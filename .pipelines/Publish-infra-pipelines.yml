@@ -1,15 +1,12 @@
-# Terraform-Infra-Pipeline
-# name: Voting Platform Infra - Plan (PR) / Plan+Apply (main)
+# Publish-infra-pipelines
+# name: Voting Platform Infra - Provision (Plan + Apply on main)
 #
-# One pipeline, two behaviors depending on trigger:
-#   - PR into main            -> Plan stage only (review gate, nothing is applied)
-#   - Push/merge into main    -> Plan stage, then Apply stage consumes THAT SAME
-#                                 run's plan artifact (never re-plans before applying,
-#                                 so what gets approved is exactly what gets applied)
-# This mirrors the PR-validates / Publish-deploys split used in voting-platform-app's
-# pipelines, just collapsed into a single file since infra has one environment (dev)
-# today instead of per-service publish pipelines.
-name: 'infra-1.0.$(Build.BuildId)'
+# Runs only on push/merge to main. Plans and applies in the SAME run (Apply stage
+# consumes this run's own plan artifact, never re-plans before applying, so what's
+# reviewed in the Plan stage output is exactly what gets applied). Mirrors the
+# Publish-<service>-pipelines.yml pattern used in voting-platform-app; the matching
+# PR-side gate is PR-infra-pipelines.yml.
+name: 'infra-provision-1.0.$(Build.BuildId)'
 
 trigger:
   branches:
@@ -19,26 +16,18 @@ trigger:
     include:
       - modules/*
       - envs/dev/*
-      - .pipelines/Terraform-infra-pipeline.yml
+      - .pipelines/Publish-infra-pipelines.yml
 
-pr:
-  branches:
-    include:
-      - main
-  paths:
-    include:
-      - modules/*
-      - envs/dev/*
-      - .pipelines/Terraform-infra-pipeline.yml
+pr: none
 
 resources:
 - repo: self
 
 variables:
   # Non-secret backend coordinates for the tfstate storage account/container created
-  # in the one-time bootstrap step (see P1.Documentations/plan.md, section 1). Centralized
-  # in a variable group for the same reason voting-platform-secrets is, even though these
-  # particular values aren't sensitive.
+  # in the one-time bootstrap step (see automated_infra.md). Centralized in a variable
+  # group for the same reason voting-platform-secrets is, even though these particular
+  # values aren't sensitive.
   - group: voting-platform-infra-secrets
   # Azure Resource Manager service connection (Contributor on the subscription) — create
   # this in Project Settings > Service Connections, same as ACRRegistryServiceConnection.
@@ -160,7 +149,7 @@ stages:
 - stage: Apply
   displayName: Terraform Apply
   dependsOn: Plan
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  condition: succeeded()
   jobs:
   - deployment: Apply
     displayName: Apply

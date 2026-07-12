@@ -15,6 +15,12 @@ resource "helm_release" "argocd" {
     name  = "configs.cm.timeout\\.reconciliation"
     value = "10s"
   }
-
+  # NodePort per Manualconfigurations.md Option B — demo/testing exposure only.
+  # Still requires the NSG inbound rule from that doc to be reachable externally;
+  # prefer port-forward (Option A) for day-to-day work.
+  set {
+    name  = "server.service.type"
+    value = "NodePort"
+  }
   depends_on = [module.aks]
 }
