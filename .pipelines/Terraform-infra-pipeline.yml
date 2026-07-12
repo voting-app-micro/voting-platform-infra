@@ -1,0 +1,240 @@
+# Terraform-Infra-Pipeline
+# name: Voting Platform Infra - Plan (PR) / Plan+Apply (main)
+#
+# One pipeline, two behaviors depending on trigger:
+#   - PR into main            -> Plan stage only (review gate, nothing is applied)
+#   - Push/merge into main    -> Plan stage, then Apply stage consumes THAT SAME
+#                                 run's plan artifact (never re-plans before applying,
+#                                 so what gets approved is exactly what gets applied)
+# This mirrors the PR-validates / Publish-deploys split used in voting-platform-app's
+# pipelines, just collapsed into a single file since infra has one environment (dev)
+# today instead of per-service publish pipelines.
+name: 'infra-1.0.$(Build.BuildId)'
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - modules/*
+      - envs/dev/*
+      - .pipelines/Terraform-infra-pipeline.yml
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - modules/*
+      - envs/dev/*
+      - .pipelines/Terraform-infra-pipeline.yml
+
+resources:
+- repo: self
+
+variables:
+  # Non-secret backend coordinates for the tfstate storage account/container created
+  # in the one-time bootstrap step (see P1.Documentations/plan.md, section 1). Centralized
+  # in a variable group for the same reason voting-platform-secrets is, even though these
+  # particular values aren't sensitive.
+  - group: voting-platform-infra-secrets
+  # Azure Resource Manager service connection (Contributor on the subscription) — create
+  # this in Project Settings > Service Connections, same as ACRRegistryServiceConnection.
+  - name: terraformServiceConnection
+    value: $(TerraformServiceConnection)
+  # Pinned tool versions for reproducible plans (bump deliberately).
+  - name: terraformVersion
+    value: '1.5.7'
+  - name: checkovVersion
+    value: '3.2.0'
+  - name: workingDirectory
+    value: '$(Build.SourcesDirectory)/envs/dev'
+  - name: vmImageName
+    value: 'ubuntu-latest'
+  - name: TF_IN_AUTOMATION
+    value: 'true'
+
+stages:
+- stage: Plan
+  displayName: Terraform Plan
+  jobs:
+  - job: Plan
+    displayName: Init, Validate, Plan
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: Bash@3
+      displayName: 'Install Terraform v$(terraformVersion) (pinned)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          wget -q "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip" -O terraform.zip
+          unzip -q terraform.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
+
+    - task: Bash@3
+      displayName: 'Terraform fmt check (fail-closed)'
+      inputs:
+        targetType: inline
+        workingDirectory: $(workingDirectory)
+        script: |
+          set -e
+          terraform fmt -check -recursive ../..
+
+    # IaC misconfiguration scan (fail-closed) — same posture as the Trivy config-scan
+    # gate in voting-platform-app's PR pipelines, applied here to the Terraform source
+    # instead of a Dockerfile.
+    - task: Bash@3
+      displayName: 'Checkov - IaC misconfig scan'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install checkov==$(checkovVersion)
+          checkov --directory $(workingDirectory) --quiet --compact --framework terraform
+
+    - task: AzureCLI@2
+      displayName: 'Terraform init'
+      inputs:
+        azureSubscription: $(terraformServiceConnection)
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -e
+          export ARM_CLIENT_ID=$servicePrincipalId
+          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_TENANT_ID=$tenantId
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          terraform -chdir=$(workingDirectory) init -input=false \
+            -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+            -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+            -backend-config="container_name=$(tfStateContainer)" \
+            -backend-config="key=voting-platform/dev.tfstate"
+
+    - task: Bash@3
+      displayName: 'Terraform validate'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          terraform -chdir=$(workingDirectory) validate
+
+    # terraform.tfvars is loaded automatically — no -var-file flag needed.
+    - task: AzureCLI@2
+      displayName: 'Terraform plan'
+      inputs:
+        azureSubscription: $(terraformServiceConnection)
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -e
+          export ARM_CLIENT_ID=$servicePrincipalId
+          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_TENANT_ID=$tenantId
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          terraform -chdir=$(workingDirectory) plan -input=false -out=tfplan
+          terraform -chdir=$(workingDirectory) show -no-color tfplan > $(Build.ArtifactStagingDirectory)/plan.txt
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish plan artifact'
+      inputs:
+        PathtoPublish: '$(workingDirectory)/tfplan'
+        artifactName: 'tfplan-$(Build.BuildId)'
+        publishLocation: Container
+
+    # Human-readable plan for reviewers — the binary tfplan above isn't diffable in the UI.
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish plan summary (human-readable)'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/plan.txt'
+        artifactName: 'plan-summary-$(Build.BuildId)'
+        publishLocation: Container
+
+- stage: Apply
+  displayName: Terraform Apply
+  dependsOn: Plan
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: Apply
+    displayName: Apply
+    pool:
+      vmImage: $(vmImageName)
+    # Targets an ADO Environment so a manual approval check can be attached in the
+    # portal (Environments > infra-dev > Approvals and checks) — same "gate outside
+    # YAML" pattern as the GitHub branch-protection rule on the app repo's PR pipelines.
+    environment: 'infra-dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: none
+
+          - task: Bash@3
+            displayName: 'Install Terraform v$(terraformVersion) (pinned)'
+            inputs:
+              targetType: inline
+              script: |
+                set -e
+                wget -q "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip" -O terraform.zip
+                unzip -q terraform.zip
+                sudo mv terraform /usr/local/bin/
+
+          - task: DownloadBuildArtifacts@0
+            displayName: 'Download plan artifact'
+            inputs:
+              buildType: current
+              downloadType: single
+              artifactName: 'tfplan-$(Build.BuildId)'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          - task: AzureCLI@2
+            displayName: 'Terraform init'
+            inputs:
+              azureSubscription: $(terraformServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_CLIENT_SECRET=$servicePrincipalKey
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                terraform -chdir=$(workingDirectory) init -input=false \
+                  -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                  -backend-config="container_name=$(tfStateContainer)" \
+                  -backend-config="key=voting-platform/dev.tfstate"
+
+          # Applies the EXACT plan produced by the Plan stage above (same Build.BuildId,
+          # same run) — never re-plans here. Re-planning at apply time would reopen the
+          # window for state to drift between what was reviewed and what gets applied.
+          #
+          # NOTE - first-ever apply into an empty subscription: the helm provider in
+          # providers.tf reads AKS connection details from module.aks, which doesn't
+          # exist until this same apply creates it. Terraform can't always resolve that
+          # in one pass on a from-scratch apply. If this fails on a fresh subscription,
+          # run `terraform apply -target=module.aks` once locally/manually first, then
+          # re-run this pipeline for the full apply (including Argo CD).
+          - task: AzureCLI@2
+            displayName: 'Terraform apply'
+            inputs:
+              azureSubscription: $(terraformServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -e
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_CLIENT_SECRET=$servicePrincipalKey
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                terraform -chdir=$(workingDirectory) apply -input=false -auto-approve \
+                  "$(System.ArtifactsDirectory)/tfplan-$(Build.BuildId)/tfplan"
