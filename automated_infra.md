@@ -14,20 +14,28 @@ Assumes no RG/ACR/AKS/tfstate storage exists yet. See the numbered sections belo
 each item.
 
 **1. Azure/ADO groundwork (manual, one-time)**
-- Ensure you have Contributor access on the target subscription.
-- Create the Azure AD app registration / service principal ADO will use, with Contributor on the subscription.
+- Ensure you have Contributor (or Owner, to grant Contributor to the connection below) access on the target subscription.
+- Don't create the app registration/service principal by hand first — create the **Service Connection** directly (see [section 3](#3-azure-devops-service-connection)); ADO provisions the underlying identity for you in one step.
 
 **2. Bootstrap the tfstate backend storage** (manual, one-time — Terraform can't create the place it stores its own state; see [section 1](#1-backend-state-storage-bootstrap--chicken-and-egg))
 - Use [scripts/prerequisite.ps1](scripts/prerequisite.ps1) to run this — it creates the RG, storage account (with blob versioning + delete retention), and the `tfstate` container in one go. Update the `$rg` / `$storageAccount` names at the top before running.
 
 **3. Azure DevOps portal config** (see [section 2](#2-azure-devops-library-variable-group-voting-platform-infra-secrets), [section 3](#3-azure-devops-service-connection), [section 4](#4-azure-devops-environment-infra-dev))
-- **Service Connection** (Project Settings → Service Connections): ARM connection using the SP from step 1.
+- **Service Connection** (Project Settings → Service Connections → New → Azure Resource Manager → **Workload identity federation (automatic)**, Contributor on the subscription) — this is where the identity from step 1 actually gets created, in one step.
 - **Variable group** `voting-platform-infra-secrets` (Pipelines → Library): fill in `TerraformServiceConnection`, `tfStateResourceGroup`, `tfStateStorageAccount`, `tfStateContainer` with step 2's values.
 - **Environment** `infra-dev` (Pipelines → Environments): create it; optionally attach a manual approval check.
 
 **4. Set values in [envs/dev/terraform.tfvars](envs/dev/terraform.tfvars)** (see [section 5](#5-envsdevterraformtfvars))
-- Since nothing pre-exists, these can be any names you want (no collision risk) — just pick real RG/ACR/AKS names and confirm `azure_region`.
-- **No `terraform import` needed at all in this scenario** — that step (see [section 6](#6-existing-manually-created-infra-needs-terraform-import-first)) only applies to the existing manually-created dev resources.
+- ⚠️ **This "clean-slate" walkthrough is hypothetical for this repo's current dev environment.** The
+  names already committed in `terraform.tfvars` (`voting-app-project`, `azuredevops`,
+  `votingappregistry7`) are **real resources that already exist** in this subscription today
+  (Manualconfigurations.md). Only proceed with these exact names via the **import path**
+  ([section 6](#6-existing-manually-created-infra-needs-terraform-import-first)) — never `apply`
+  against them unimported, or Terraform will try to create duplicates and fail on name collisions.
+- If you genuinely want a separate, brand-new environment (e.g. a second dev cluster, or standing
+  this up in a different subscription) — pick **different** RG/ACR/AKS names than the ones above,
+  confirm `azure_region`, and skip the import step entirely; nothing collides.
+- **No `terraform import` needed** only in that second, genuinely-new-names case.
 
 **5. Open a PR touching `envs/dev/*`**
 - Triggers **PR-infra-pipelines.yml** (Plan stage only). Review the `plan-summary` artifact — should show all resources to be created, nothing to destroy/change.
@@ -87,9 +95,23 @@ under the VG's *Pipeline permissions* tab, to avoid the run stalling on approval
 
 ## 3. Azure DevOps Service Connection
 
-Under **Project Settings → Service Connections**: an ARM service connection (Contributor on the
-subscription) whose name matches the `TerraformServiceConnection` value above. Same pattern as
-`ACRRegistryServiceConnection` used in `voting-platform-app`.
+Under **Project Settings → Service Connections → New service connection → Azure Resource Manager**.
+Don't pre-create an app registration/SP by hand — pick the identity type ADO creates for you:
+
+- **Recommended: Workload identity federation (automatic).** ADO creates the app registration and an
+  OIDC federated credential trusting this specific pipeline — no client secret is ever generated,
+  stored, or rotated. This is the current Microsoft-recommended approach and what a mature setup
+  should use. Select subscription → resource group scope not required (leave at subscription level
+  since this connection provisions RG/ACR/AKS themselves) → grant **Contributor** on the subscription.
+- **Fallback: App registration or service principal (automatic), secret-based.** Only use this if
+  your ADO organization doesn't support workload identity federation yet. This generates a real
+  client secret ADO stores and uses — has an expiry you must rotate manually before it lapses.
+
+Either way, name the connection whatever you'll put in the `TerraformServiceConnection` variable
+(step 2 of the walkthrough). Same pattern as `ACRRegistryServiceConnection` used in
+`voting-platform-app`, just prefer the federated option here since this connection needs Contributor
+on the whole subscription (broader blast radius than a registry-scoped connection, so a
+credential-less approach matters more).
 
 ---
 
@@ -119,18 +141,75 @@ aks_node_count      = 2
 `az group show -n voting-app-project --query location` before the first plan/import, or the plan
 will show a spurious diff.
 
+These values point at **real, currently-running resources** (see [section 6](#6-existing-manually-created-infra-needs-terraform-import-first))
+— don't run `apply` against this file as-is without importing first, and don't change these names
+"just to test" without realizing you'd be pointing Terraform at a different (non-existent, or
+someone else's) set of resources.
+
 ---
 
 ## 6. Existing manually-created infra needs `terraform import` first
 
 Per [Manualconfigurations.md](Manualconfigurations.md#L125-L134), the RG/ACR/AKS/ACR-pull-role/Argo CD
-were created manually before this Terraform config existed. There is **no `import {}` block or import
-script in this repo** — before the first real `apply` against them, each resource must be imported by
-hand (e.g. `terraform import module.resource_group.azurerm_resource_group.this ...`), otherwise
-`apply` will try to create duplicates and fail on name collisions.
+were created manually before this Terraform config existed. This only applies to the current dev
+environment's pre-existing resources — a from-scratch environment (nothing pre-existing) does not
+need this section at all.
 
-This only applies to the current dev environment's pre-existing resources — a from-scratch
-environment (nothing pre-existing) does not need this step.
+### Use `import {}` blocks, not ad-hoc `terraform import` CLI
+
+A one-off `terraform import` run by a human against production-ish infra isn't how a mature pipeline
+does this — it's invisible to `terraform plan`, isn't reviewable in a PR, and can't run non-interactively
+in the pipeline's `AzureCLI@2` steps. Instead, add a temporary `import.tf` in `envs/dev/` with
+[`import {}` blocks](https://developer.hashicorp.com/terraform/language/import) (supported since
+Terraform 1.5, which this repo already requires). These show up as "N resources to import" in
+`terraform plan` — reviewable in the PR pipeline's plan-summary artifact like any other change —
+and apply cleanly through the normal `Publish-infra-pipelines.yml` run. Delete `import.tf` once the
+first apply succeeds; it's a one-time migration aid, not permanent config.
+
+```hcl
+# envs/dev/import.tf — delete after first successful apply
+
+import {
+  to = module.resource_group.azurerm_resource_group.this
+  id = "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/voting-app-project"
+}
+
+import {
+  to = module.acr.azurerm_container_registry.this
+  id = "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/voting-app-project/providers/Microsoft.ContainerRegistry/registries/votingappregistry7"
+}
+
+import {
+  to = module.aks.azurerm_kubernetes_cluster.this
+  id = "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/voting-app-project/providers/Microsoft.ContainerService/managedClusters/azuredevops"
+}
+
+import {
+  to = azurerm_role_assignment.aks_acr_pull
+  id = "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/voting-app-project/providers/Microsoft.ContainerRegistry/registries/votingappregistry7/providers/Microsoft.Authorization/roleAssignments/<ROLE_ASSIGNMENT_GUID>"
+}
+```
+
+- The role assignment's GUID isn't guessable — look it up first:
+  ```bash
+  az role assignment list --scope <acr-resource-id> --query "[?roleDefinitionName=='AcrPull'].name" -o tsv
+  ```
+
+### Argo CD can't be imported this way — decide instead of importing
+
+Your manual Argo CD was installed via raw `kubectl apply -f install.yaml`
+(Manualconfigurations.md section 4), **not** `helm install`. Terraform's `helm_release.argocd`
+resource tracks state through a Helm release record that only exists for charts actually installed
+via Helm — there is nothing to import it into. Don't attempt an `import {}` block for it; pick one:
+
+- **Reinstall via Helm (recommended, matches how the rest of this migration works):** delete the
+  manually-installed Argo CD (`kubectl delete namespace argocd` — confirm you're fine losing its
+  current app registrations first, since you'll redo [section 8](#8-post-apply-whats-still-manual)'s
+  "register repo + create Application" steps afterward), then let the normal `apply`
+  (with `import.tf` covering only RG/ACR/AKS/role-assignment) create it fresh via `helm_release`.
+- **Or exclude it for now:** temporarily comment out/remove `argocd.tf` from this apply, import and
+  reconcile just RG/ACR/AKS/role-assignment first, and handle the Argo CD Helm cutover as its own
+  deliberate follow-up once the rest of the state matches reality.
 
 ---
 
