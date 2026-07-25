@@ -114,8 +114,12 @@ stages:
         addSpnToEnvironment: true
         inlineScript: |
           set -e
+          # WIF service connection: no client secret exists. addSpnToEnvironment exposes
+          # the federated JWT as $idToken instead of $servicePrincipalKey — the azurerm
+          # provider needs ARM_OIDC_TOKEN + ARM_USE_OIDC, not ARM_CLIENT_SECRET.
           export ARM_CLIENT_ID=$servicePrincipalId
-          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_OIDC_TOKEN=$idToken
+          export ARM_USE_OIDC=true
           export ARM_TENANT_ID=$tenantId
           export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
           terraform -chdir=$(workingDirectory) init -input=false \
@@ -142,8 +146,12 @@ stages:
         addSpnToEnvironment: true
         inlineScript: |
           set -e
+          # WIF service connection: no client secret exists. addSpnToEnvironment exposes
+          # the federated JWT as $idToken instead of $servicePrincipalKey — the azurerm
+          # provider needs ARM_OIDC_TOKEN + ARM_USE_OIDC, not ARM_CLIENT_SECRET.
           export ARM_CLIENT_ID=$servicePrincipalId
-          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_OIDC_TOKEN=$idToken
+          export ARM_USE_OIDC=true
           export ARM_TENANT_ID=$tenantId
           export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
           terraform -chdir=$(workingDirectory) plan -input=false -out=tfplan
