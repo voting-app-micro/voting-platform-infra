@@ -81,6 +81,20 @@ stages:
     # IaC misconfiguration scan (fail-closed) — same posture as the Trivy config-scan
     # gate in voting-platform-app's PR pipelines, applied here to the Terraform source
     # instead of a Dockerfile.
+    #
+    # --skip-check below are documented exceptions (same pattern as .trivyignore in
+    # voting-platform-app) — re-evaluate before staging/prod:
+    #   ACR checks need Premium SKU or Microsoft Defender for Cloud (real cost on a Basic
+    #   dev registry): CKV_AZURE_163/167/165/166/164/233/139.
+    #   AKS checks either cost real money or break the current access model:
+    #   CKV_AZURE_226 (ephemeral OS disk — needs a per-VM-SKU cache-size check),
+    #   CKV_AZURE_117 (disk encryption set), CKV_AZURE_170 (Paid SKU tier),
+    #   CKV_AZURE_6 (authorized IP ranges — ADO-hosted agents have no stable IP),
+    #   CKV_AZURE_232 (critical-pods-only — needs a 2nd node pool),
+    #   CKV_AZURE_227 (host encryption — needs a subscription feature registration),
+    #   CKV_AZURE_115 (private cluster — breaks kubectl/az aks get-credentials as used today),
+    #   CKV_AZURE_141 (disable local admin — breaks the kube_config outputs without AAD RBAC
+    #   first; matches the Argo CD hardening gap already flagged in automated_infra.md #8).
     - task: Bash@3
       displayName: 'Checkov - IaC misconfig scan'
       inputs:
@@ -89,7 +103,8 @@ stages:
           set -e
           python -m pip install --upgrade pip
           pip install checkov==$(checkovVersion)
-          checkov --directory $(workingDirectory) --quiet --compact --framework terraform
+          checkov --directory $(workingDirectory) --quiet --compact --framework terraform \
+            --skip-check CKV_AZURE_163,CKV_AZURE_167,CKV_AZURE_165,CKV_AZURE_166,CKV_AZURE_164,CKV_AZURE_233,CKV_AZURE_139,CKV_AZURE_226,CKV_AZURE_117,CKV_AZURE_170,CKV_AZURE_6,CKV_AZURE_232,CKV_AZURE_227,CKV_AZURE_115,CKV_AZURE_141
 
     - task: AzureCLI@2
       displayName: 'Terraform init'
