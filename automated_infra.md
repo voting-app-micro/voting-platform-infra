@@ -96,7 +96,13 @@ under the VG's *Pipeline permissions* tab, to avoid the run stalling on approval
 ## 3. Azure DevOps Service Connection
 
 Under **Project Settings → Service Connections → New service connection → Azure Resource Manager**.
-Don't pre-create an app registration/SP by hand — pick the identity type ADO creates for you:
+Don't pre-create an app registration/SP by hand — pick the identity type ADO creates for you.
+
+Dialog fields: **Identity type** = `App registration (automatic)`, **Credential** =
+`Workload identity federation`, **Scope level** = `Subscription`, **Resource group** = leave at
+`All resource groups` (don't narrow it despite Azure's hint — this connection needs to provision the
+RG itself). Name it whatever goes in `TerraformServiceConnection`; Service Management
+Reference/Description are optional, org-policy-dependent.
 
 - **Recommended: Workload identity federation (automatic).** ADO creates the app registration and an
   OIDC federated credential trusting this specific pipeline — no client secret is ever generated,

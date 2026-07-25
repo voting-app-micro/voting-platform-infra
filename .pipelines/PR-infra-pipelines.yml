@@ -6,7 +6,7 @@
 # voting-platform-app; the matching apply-side counterpart is
 # Publish-infra-pipelines.yml.
 name: 'infra-pr-1.0.$(Build.BuildId)'
-
+# PR Pipeline: https://dev.azure.com/neesh90900932/PythonWorks/_build?definitionId=9&_a=summary
 trigger: none
 
 pr:

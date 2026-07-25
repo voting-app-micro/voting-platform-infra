@@ -7,7 +7,7 @@
 # Publish-<service>-pipelines.yml pattern used in voting-platform-app; the matching
 # PR-side gate is PR-infra-pipelines.yml.
 name: 'infra-provision-1.0.$(Build.BuildId)'
-
+# Publish Pipeline: https://dev.azure.com/neesh90900932/PythonWorks/_build?definitionId=8&_a=summary
 trigger:
   branches:
     include:
