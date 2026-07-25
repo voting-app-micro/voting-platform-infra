@@ -31,8 +31,12 @@ variables:
   - group: voting-platform-infra-secrets
   # Azure Resource Manager service connection (Contributor on the subscription) — create
   # this in Project Settings > Service Connections, same as ACRRegistryServiceConnection.
+  # Must be a literal here, NOT sourced from the variable group above: ADO's service-connection
+  # authorization check runs at queue time, before variable-group values are fetched, so a
+  # VG-sourced variable in `azureSubscription` always fails with "could not be found" even
+  # though it resolves fine at runtime. See https://aka.ms/yamlauthz.
   - name: terraformServiceConnection
-    value: $(TerraformServiceConnection)
+    value: 'Terraform-Sc'
   # Pinned tool versions for reproducible plans (bump deliberately).
   - name: terraformVersion
     value: '1.5.7'

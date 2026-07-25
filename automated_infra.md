@@ -21,8 +21,8 @@ each item.
 - Use [scripts/prerequisite.ps1](scripts/prerequisite.ps1) to run this — it creates the RG, storage account (with blob versioning + delete retention), and the `tfstate` container in one go. Update the `$rg` / `$storageAccount` names at the top before running.
 
 **3. Azure DevOps portal config** (see [section 2](#2-azure-devops-library-variable-group-voting-platform-infra-secrets), [section 3](#3-azure-devops-service-connection), [section 4](#4-azure-devops-environment-infra-dev))
-- **Service Connection** (Project Settings → Service Connections → New → Azure Resource Manager → **Workload identity federation (automatic)**, Contributor on the subscription) — this is where the identity from step 1 actually gets created, in one step.
-- **Variable group** `voting-platform-infra-secrets` (Pipelines → Library): fill in `TerraformServiceConnection`, `tfStateResourceGroup`, `tfStateStorageAccount`, `tfStateContainer` with step 2's values.
+- **Service Connection** (Project Settings → Service Connections → New → Azure Resource Manager → **Workload identity federation (automatic)**, Contributor on the subscription) — this is where the identity from step 1 actually gets created, in one step. Note its name — it goes directly into the pipeline YAMLs, not the variable group (see [section 2](#2-azure-devops-library-variable-group-voting-platform-infra-secrets)).
+- **Variable group** `voting-platform-infra-secrets` (Pipelines → Library): fill in `tfStateResourceGroup`, `tfStateStorageAccount`, `tfStateContainer` with step 2's values.
 - **Environment** `infra-dev` (Pipelines → Environments): create it; optionally attach a manual approval check.
 
 **4. Set values in [envs/dev/terraform.tfvars](envs/dev/terraform.tfvars)** (see [section 5](#5-envsdevterraformtfvars))
@@ -78,15 +78,23 @@ State blob key used: `voting-platform/dev.tfstate`.
 
 Referenced in both pipelines — [PR-infra-pipelines.yml:30](.pipelines/PR-infra-pipelines.yml#L30) and
 [Publish-infra-pipelines.yml:31](.pipelines/Publish-infra-pipelines.yml#L31). Must be
-created under **Pipelines → Library** with these 4 variables filled in (currently the values must
+created under **Pipelines → Library** with these 3 variables filled in (currently the values must
 point at the storage account from step 1):
 
 | Variable | Purpose |
 |---|---|
-| `TerraformServiceConnection` | Name of the ARM service connection (step 3) |
 | `tfStateResourceGroup` | RG holding the tfstate storage account |
 | `tfStateStorageAccount` | Storage account name from step 1 |
 | `tfStateContainer` | Container name from step 1 (`tfstate`) |
+
+⚠️ **Do NOT put the service connection name/ID in this variable group.** The `azureSubscription`
+input on `AzureCLI@2` tasks is a *protected resource reference* — ADO authorizes it at **queue
+time**, before variable-group values are fetched. A VG-sourced variable there always fails with
+*"references service connection `$(...)` which could not be found"* even though the same variable
+resolves fine at runtime (confirmed via a real failed build — the error showed the literal
+unexpanded `$(TerraformServiceConnection)` text, not the VG's value). The connection name must be
+hardcoded as a literal pipeline variable in each `.pipelines/*.yml` file instead — see
+[section 3](#3-azure-devops-service-connection). Reference: https://aka.ms/yamlauthz.
 
 First pipeline run using this VG may prompt to **"authorize resource"** — approve it, or pre-authorize
 under the VG's *Pipeline permissions* tab, to avoid the run stalling on approval.
@@ -113,11 +121,15 @@ Reference/Description are optional, org-policy-dependent.
   your ADO organization doesn't support workload identity federation yet. This generates a real
   client secret ADO stores and uses — has an expiry you must rotate manually before it lapses.
 
-Either way, name the connection whatever you'll put in the `TerraformServiceConnection` variable
-(step 2 of the walkthrough). Same pattern as `ACRRegistryServiceConnection` used in
-`voting-platform-app`, just prefer the federated option here since this connection needs Contributor
-on the whole subscription (broader blast radius than a registry-scoped connection, so a
+Either way, name the connection whatever you'll hardcode as the `terraformServiceConnection`
+pipeline variable's literal value in both `.pipelines/*.yml` files (see [section 2](#2-azure-devops-library-variable-group-voting-platform-infra-secrets)
+for why this can't come from the variable group). Same pattern as `ACRRegistryServiceConnection`
+used in `voting-platform-app`, just prefer the federated option here since this connection needs
+Contributor on the whole subscription (broader blast radius than a registry-scoped connection, so a
 credential-less approach matters more).
+
+**Current repo value:** the connection is named `Terraform-Sc` (Workload identity federation,
+Contributor on `Pay-As-You-Go`), hardcoded directly in both pipeline YAMLs' `variables:` block.
 
 ---
 
